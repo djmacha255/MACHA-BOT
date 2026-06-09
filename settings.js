@@ -1,16 +1,17 @@
 const settings = {
-  packname: 'MACHA-BOT',
-  author: '‎',
-  botName: "MACHA-BOT",
-  botOwner: 'DJ MACHA 255', // Your name
-  ownerNumber: '255612801118', //Set your number here without + symbol, just add country code & number without any space
+  packname: '🎧 MACHA-AI CORE ⚡',
+  author: 'DJ MACHA 255',
+  botName: "MACHA-AI SUPER BOT",
+  botOwner: 'DJ MACHA 255', 
+  ownerNumber: '255612801118', 
   giphyApiKey: 'qnl7ssQChTdPjsKta2Ax2LMaGXz303tq',
   commandMode: "public",
   maxStoreMessages: 20, 
   storeWriteInterval: 10000,
-  description: "This is a bot for managing group commands and automating tasks.",
+  description: "Advanced WhatsApp Multi-Device Bot integrated with AI Core Engines and Cyber Reconnaissance Suites. Engineered by DJ MACHA 255.",
   version: "3.0.7",
-  updateZipUrl: "https://github.com/mruniquehacker/Knightbot-MD/archive/refs/heads/main.zip",
+  // Inasoma sasa kutoka kwenye Repository yako rasmi kiotomatiki
+  updateZipUrl: "https://github.com/djmacha255/MACHA-BOT/archive/refs/heads/main.zip",
 };
 
 module.exports = settings;
