@@ -1,143 +1,83 @@
 /**
- * Knight Bot - A WhatsApp Bot
- * Copyright (c) 2024 Professor
- * 
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the MIT License.
- * 
- * Credits:
- * - Baileys Library by @adiwajshing
- * - Pair Code implementation inspired by TechGod143 & DGXEON
+ * MACHA-AI CORE v3.0.7
+ * Engineered by DJ MACHA 255
  */
-require('./settings')
-const { Boom } = require('@hapi/boom')
-const fs = require('fs')
-const chalk = require('chalk')
-const FileType = require('file-type')
-const path = require('path')
-const axios = require('axios')
-const { handleMessages, handleGroupParticipantUpdate, handleStatus } = require('./main');
-const PhoneNumber = require('awesome-phonenumber')
-const { imageToWebp, videoToWebp, writeExifImg, writeExifVid } = require('./lib/exif')
-const { smsg, isUrl, generateMessageTag, getBuffer, getSizeMedia, fetch, await, sleep, reSize } = require('./lib/myfunc')
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    DisconnectReason,
-    fetchLatestBaileysVersion,
-    generateForwardMessageContent,
-    prepareWAMessageMedia,
-    generateWAMessageFromContent,
-    generateMessageID,
-    downloadContentFromMessage,
-    jidDecode,
-    proto,
-    jidNormalizedUser,
-    makeCacheableSignalKeyStore,
-    delay
-} = require("@whiskeysockets/baileys")
-const NodeCache = require("node-cache")
-// Using a lightweight persisted store instead of makeInMemoryStore (compat across versions)
-const pino = require("pino")
-const readline = require("readline")
-const { parsePhoneNumber } = require("libphonenumber-js")
-const { PHONENUMBER_MCC } = require('@whiskeysockets/baileys/lib/Utils/generics')
-const { rmSync, existsSync } = require('fs')
-const { join } = require('path')
+require('./settings');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, delay } = require("@whiskeysockets/baileys");
+const pino = require("pino");
+const fs = require('fs');
+const chalk = require('chalk');
+const NodeCache = require("node-cache");
+const settings = require('./settings');
 
-// Import lightweight store
-const store = require('./lib/lightweight_store')
+// Initialize Store
+const store = require('./lib/lightweight_store');
+store.readFromFile();
+setInterval(() => store.writeToFile(), settings.storeWriteInterval || 10000);
 
-// Initialize store
-store.readFromFile()
-const settings = require('./settings')
-setInterval(() => store.writeToFile(), settings.storeWriteInterval || 10000)
+async function startMachaBot() {
+    const { state, saveCreds } = await useMultiFileAuthState(`./session`);
+    const { version } = await fetchLatestBaileysVersion();
+    
+    const sock = makeWASocket({
+        version,
+        logger: pino({ level: 'silent' }),
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
+        },
+        browser: ["MACHA-AI", "Ubuntu", "3.0"],
+        getMessage: async (key) => {
+            const jid = jidNormalizedUser(key.remoteJid);
+            const msg = await store.loadMessage(jid, key.id);
+            return msg?.message || "";
+        }
+    });
 
-// Memory optimization - Force garbage collection if available
-setInterval(() => {
-    if (global.gc) {
-        global.gc()
-        console.log('🧹 Garbage collection completed')
-    }
-}, 60_000) // every 1 minute
+    sock.ev.on('creds.update', saveCreds);
+    store.bind(sock.ev);
 
-// Memory monitoring - Restart if RAM gets too high
-setInterval(() => {
-    const used = process.memoryUsage().rss / 1024 / 1024
-    if (used > 400) {
-        console.log('⚠️ RAM too high (>400MB), restarting bot...')
-        process.exit(1) // Panel will auto-restart
-    }
-}, 30_000) // check every 30 seconds
+    // CENTRAL COMMAND HANDLER
+    sock.ev.on('messages.upsert', async chatUpdate => {
+        try {
+            const mek = chatUpdate.messages[0];
+            if (!mek.message) return;
+            
+            const body = mek.message.conversation || mek.message.extendedTextMessage?.text || "";
+            const prefix = settings.prefix || ".";
 
-let phoneNumber = "255612801118"
-let owner = JSON.parse(fs.readFileSync('./data/owner.json'))
+            if (body.startsWith(prefix)) {
+                const args = body.slice(prefix.length).trim().split(/ +/);
+                const command = args.shift().toLowerCase();
+                
+                // Njia sahihi ya Linux inayozuia "Cannot find module"
+                const cmdPath = `./commands/${command}.js`;
+                
+                if (fs.existsSync(cmdPath)) {
+                    const cmd = require(cmdPath);
+                    // Tunatumia muundo tuliokubaliana: (sock, chatId, message)
+                    await cmd(sock, mek.key.remoteJid, mek);
+                }
+            }
+        } catch (err) {
+            console.error(chalk.red("Command Handler Error:"), err);
+        }
+    });
 
-global.botname = "MACHA-BOT"
-global.themeemoji = "•"
-const pairingCode = !!phoneNumber || process.argv.includes("--pairing-code")
-const useMobile = process.argv.includes("--mobile")
-
-// Only create readline interface if we're in an interactive environment
-const rl = process.stdin.isTTY ? readline.createInterface({ input: process.stdin, output: process.stdout }) : null
-const question = (text) => {
-    if (rl) {
-        return new Promise((resolve) => rl.question(text, resolve))
-    } else {
-        // In non-interactive environment, use ownerNumber from settings
-        return Promise.resolve(settings.ownerNumber || phoneNumber)
-    }
+    // Connection Updates
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'open') {
+            console.log(chalk.magenta.bold(`\n🌿 MACHA-AI CORE CONNECTED SUCCESSFULLY ⚡`));
+        }
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) startMachaBot();
+        }
+    });
 }
 
-
-async function startXeonBotInc() {
-    try {
-        let { version, isLatest } = await fetchLatestBaileysVersion()
-        const { state, saveCreds } = await useMultiFileAuthState(`./session`)
-        const msgRetryCounterCache = new NodeCache()
-
-        const XeonBotInc = makeWASocket({
-            version,
-            logger: pino({ level: 'silent' }),
-            printQRInTerminal: !pairingCode,
-            browser: ["Ubuntu", "Chrome", "20.0.04"],
-            auth: {
-                creds: state.creds,
-                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
-            },
-            markOnlineOnConnect: true,
-            generateHighQualityLinkPreview: true,
-            syncFullHistory: false,
-            getMessage: async (key) => {
-                let jid = jidNormalizedUser(key.remoteJid)
-                let msg = await store.loadMessage(jid, key.id)
-                return msg?.message || ""
-            },
-            msgRetryCounterCache,
-            defaultQueryTimeoutMs: 60000,
-            connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 10000,
-        })
-
-        // Save credentials when they update
-        XeonBotInc.ev.on('creds.update', saveCreds)
-
-    store.bind(XeonBotInc.ev)
-
-    // Message handling
-    XeonBotInc.ev.on('messages.upsert', async chatUpdate => {
-        try {
-            const mek = chatUpdate.messages[0]
-            if (!mek.message) return
-            mek.message = (Object.keys(mek.message)[0] === 'ephemeralMessage') ? mek.message.ephemeralMessage.message : mek.message
-            if (mek.key && mek.key.remoteJid === 'status@broadcast') {
-                await handleStatus(XeonBotInc, chatUpdate);
-                return;
-            }
-            // In private mode, only block non-group messages (allow groups for moderation)
-            // Note: XeonBotInc.public is not synced, so we check mode in main.js instead
-            // This check is kept for backward compatibility but mainly blocks DMs
-            if (!XeonBotInc.public && !mek.key.fromMe && chatUpdate.type === 'notify') {
+startMachaBot().catch(err => console.log(err));
                 const isGroup = mek.key?.remoteJid?.endsWith('@g.us')
                 if (!isGroup) return // Block DMs in private mode, but allow group messages
             }
