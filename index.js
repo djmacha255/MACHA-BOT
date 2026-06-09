@@ -1,25 +1,22 @@
 /**
- * MACHA-AI CORE v3.1.0
+ * MACHA-AI CORE v3.0.7
  * Engineered by DJ MACHA 255
  */
 require('./settings');
-const { 
-    default: makeWASocket, 
-    useMultiFileAuthState, 
-    DisconnectReason, 
-    fetchLatestBaileysVersion, 
-    makeCacheableSignalKeyStore, 
-    jidNormalizedUser 
-} = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, jidNormalizedUser, delay } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const fs = require('fs');
 const chalk = require('chalk');
-const { handleMessages, handleStatus, handleGroupParticipantUpdate } = require('./main');
-const store = require('./lib/lightweight_store');
+const NodeCache = require("node-cache");
+const readline = require("readline"); // Kwa ajili ya kuuliza namba kwenye terminal
+const settings = require('./settings');
 
-// Initialize Store
+const store = require('./lib/lightweight_store');
 store.readFromFile();
-setInterval(() => store.writeToFile(), 10000);
+setInterval(() => store.writeToFile(), settings.storeWriteInterval || 10000);
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const question = (text) => new Promise((resolve) => rl.question(text, resolve));
 
 async function startMachaBot() {
     const { state, saveCreds } = await useMultiFileAuthState(`./session`);
@@ -28,12 +25,12 @@ async function startMachaBot() {
     const sock = makeWASocket({
         version,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: true, // Itatoa QR moja kwa moja
+        printQRInTerminal: false, // Tunatumia Pairing Code badala ya QR
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
         },
-        browser: ["MACHA-AI", "DJ MACHA 255", "3.0"],
+        browser: ["MACHA-AI", "Ubuntu", "3.0"],
         getMessage: async (key) => {
             const jid = jidNormalizedUser(key.remoteJid);
             const msg = await store.loadMessage(jid, key.id);
@@ -44,63 +41,47 @@ async function startMachaBot() {
     sock.ev.on('creds.update', saveCreds);
     store.bind(sock.ev);
 
-    // CENTRAL MESSAGE HANDLER
+    // PAIRING CODE LOGIC: Kama hakuna session, bot inakuomba namba
+    if (!sock.authState.creds.registered) {
+        console.log(chalk.yellow("🌿 No session found. Initiating pairing process..."));
+        let phoneNumber = await question(chalk.green("Enter your WhatsApp number (e.g., 255612801118): "));
+        phoneNumber = phoneNumber.replace(/[^0-9]/g, '');
+
+        let code = await sock.requestPairingCode(phoneNumber);
+        console.log(chalk.cyan.bold("Your Pairing Code is: "), chalk.white.bold(code));
+    }
+
+    // CENTRAL COMMAND HANDLER
     sock.ev.on('messages.upsert', async chatUpdate => {
         try {
             const mek = chatUpdate.messages[0];
             if (!mek.message) return;
+            
+            const body = mek.message.conversation || mek.message.extendedTextMessage?.text || "";
+            const prefix = settings.prefix || ".";
 
-            // Log ujumbe unaoingia kwa debugging (Itaonekana kwenye terminal)
-            const from = mek.key.remoteJid;
-            console.log(chalk.blue(`[MACHA-AI] Incoming message from: ${from}`));
-
-            // Handling Status
-            if (from === 'status@broadcast') {
-                await handleStatus(sock, chatUpdate);
-                return;
+            if (body.startsWith(prefix)) {
+                const args = body.slice(prefix.length).trim().split(/ +/);
+                const command = args.shift().toLowerCase();
+                const cmdPath = `./commands/${command}.js`;
+                
+                if (fs.existsSync(cmdPath)) {
+                    await require(cmdPath)(sock, mek.key.remoteJid, mek);
+                }
             }
-
-            // Hii ndiyo sehemu inayopaswa kuitisha amri zako kutoka main.js
-            await handleMessages(sock, chatUpdate, true);
-
         } catch (err) {
-            console.error(chalk.red("Error in messages.upsert:"), err);
+            console.error(chalk.red("Handler Error:"), err);
         }
     });
 
-    // Group Updates
-    sock.ev.on('group-participants.update', async (update) => {
-        await handleGroupParticipantUpdate(sock, update);
-    });
-
-    // Connection Updates
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
-        
-        if (connection === 'open') {
-            console.log(chalk.magenta.bold(`\n🌿 DJ MACHA 255 -> MACHA-AI CORE IS ONLINE ⚡`));
-        }
-        
+        if (connection === 'open') console.log(chalk.magenta.bold(`\n🌿 MACHA-AI CORE CONNECTED`));
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) {
-                console.log(chalk.yellow("Muunganisho umekatika... Inajaribu kuunganisha upya."));
-                startMachaBot();
-            } else {
-                console.log(chalk.red("Akaunti imetoka (Logged Out). Tafadhali futa folda ya 'session' na uunganishe upya."));
-            }
+            if (shouldReconnect) startMachaBot();
         }
     });
 }
 
-// Start
-startMachaBot().catch(err => console.error(chalk.red("Fatal Error:"), err));
-
-// Hii inazuia bot kufa ghafla ikipata error
-process.on('uncaughtException', (err) => {
-    console.error('Uncaught Exception:', err);
-});
-
-process.on('unhandledRejection', (err) => {
-    console.error('Unhandled Rejection:', err);
-});
+startMachaBot();
