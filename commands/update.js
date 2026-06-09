@@ -1,8 +1,6 @@
 const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
-const settings = require('../settings');
 const isOwnerOrSudo = require('../lib/isOwner');
 
 function run(cmd) {
@@ -37,195 +35,74 @@ async function updateViaGit() {
     return { oldRev, newRev, alreadyUpToDate, commits, files };
 }
 
-function downloadFile(url, dest, visited = new Set()) {
-    return new Promise((resolve, reject) => {
-        try {
-            // Avoid infinite redirect loops
-            if (visited.has(url) || visited.size > 5) {
-                return reject(new Error('Too many redirects'));
-            }
-            visited.add(url);
-
-            const useHttps = url.startsWith('https://');
-            const client = useHttps ? require('https') : require('http');
-            const req = client.get(url, {
-                headers: {
-                    'User-Agent': 'KnightBot-Updater/1.0',
-                    'Accept': '*/*'
-                }
-            }, res => {
-                // Handle redirects
-                if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
-                    const location = res.headers.location;
-                    if (!location) return reject(new Error(`HTTP ${res.statusCode} without Location`));
-                    const nextUrl = new URL(location, url).toString();
-                    res.resume();
-                    return downloadFile(nextUrl, dest, visited).then(resolve).catch(reject);
-                }
-
-                if (res.statusCode !== 200) {
-                    return reject(new Error(`HTTP ${res.statusCode}`));
-                }
-
-                const file = fs.createWriteStream(dest);
-                res.pipe(file);
-                file.on('finish', () => file.close(resolve));
-                file.on('error', err => {
-                    try { file.close(() => {}); } catch {}
-                    fs.unlink(dest, () => reject(err));
-                });
-            });
-            req.on('error', err => {
-                fs.unlink(dest, () => reject(err));
-            });
-        } catch (e) {
-            reject(e);
-        }
-    });
-}
-
-async function extractZip(zipPath, outDir) {
-    // Try to use platform tools; no extra npm modules required
-    if (process.platform === 'win32') {
-        const cmd = `powershell -NoProfile -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${outDir.replace(/\\/g, '/')}' -Force"`;
-        await run(cmd);
-        return;
-    }
-    // Linux/mac: try unzip, else 7z, else busybox unzip
-    try {
-        await run('command -v unzip');
-        await run(`unzip -o '${zipPath}' -d '${outDir}'`);
-        return;
-    } catch {}
-    try {
-        await run('command -v 7z');
-        await run(`7z x -y '${zipPath}' -o'${outDir}'`);
-        return;
-    } catch {}
-    try {
-        await run('busybox unzip -h');
-        await run(`busybox unzip -o '${zipPath}' -d '${outDir}'`);
-        return;
-    } catch {}
-    throw new Error("No system unzip tool found (unzip/7z/busybox). Git mode is recommended on this panel.");
-}
-
-function copyRecursive(src, dest, ignore = [], relative = '', outList = []) {
-    if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
-    for (const entry of fs.readdirSync(src)) {
-        if (ignore.includes(entry)) continue;
-        const s = path.join(src, entry);
-        const d = path.join(dest, entry);
-        const stat = fs.lstatSync(s);
-        if (stat.isDirectory()) {
-            copyRecursive(s, d, ignore, path.join(relative, entry), outList);
-        } else {
-            fs.copyFileSync(s, d);
-            if (outList) outList.push(path.join(relative, entry).replace(/\\/g, '/'));
-        }
-    }
-}
-
-async function updateViaZip(sock, chatId, message, zipOverride) {
-    const zipUrl = (zipOverride || settings.updateZipUrl || process.env.UPDATE_ZIP_URL || '').trim();
-    if (!zipUrl) {
-        throw new Error('No ZIP URL configured. Set settings.updateZipUrl or UPDATE_ZIP_URL env.');
-    }
-    const tmpDir = path.join(process.cwd(), 'tmp');
-    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-    const zipPath = path.join(tmpDir, 'update.zip');
-    await downloadFile(zipUrl, zipPath);
-    const extractTo = path.join(tmpDir, 'update_extract');
-    if (fs.existsSync(extractTo)) fs.rmSync(extractTo, { recursive: true, force: true });
-    await extractZip(zipPath, extractTo);
-
-    // Find the top-level extracted folder (GitHub zips create REPO-branch folder)
-    const [root] = fs.readdirSync(extractTo).map(n => path.join(extractTo, n));
-    const srcRoot = fs.existsSync(root) && fs.lstatSync(root).isDirectory() ? root : extractTo;
-
-    // Copy over while preserving runtime dirs/files
-    const ignore = ['node_modules', '.git', 'session', 'tmp', 'tmp/', 'temp', 'data', 'baileys_store.json'];
-    const copied = [];
-    // Preserve ownerNumber from existing settings.js if present
-    let preservedOwner = null;
-    let preservedBotOwner = null;
-    try {
-        const currentSettings = require('../settings');
-        preservedOwner = currentSettings && currentSettings.ownerNumber ? String(currentSettings.ownerNumber) : null;
-        preservedBotOwner = currentSettings && currentSettings.botOwner ? String(currentSettings.botOwner) : null;
-    } catch {}
-    copyRecursive(srcRoot, process.cwd(), ignore, '', copied);
-    if (preservedOwner) {
-        try {
-            const settingsPath = path.join(process.cwd(), 'settings.js');
-            if (fs.existsSync(settingsPath)) {
-                let text = fs.readFileSync(settingsPath, 'utf8');
-                text = text.replace(/ownerNumber:\s*'[^']*'/, `ownerNumber: '${preservedOwner}'`);
-                if (preservedBotOwner) {
-                    text = text.replace(/botOwner:\s*'[^']*'/, `botOwner: '${preservedBotOwner}'`);
-                }
-                fs.writeFileSync(settingsPath, text);
-            }
-        } catch {}
-    }
-    // Cleanup extracted directory
-    try { fs.rmSync(extractTo, { recursive: true, force: true }); } catch {}
-    try { fs.rmSync(zipPath, { force: true }); } catch {}
-    return { copiedFiles: copied };
-}
-
-async function restartProcess(sock, chatId, message) {
-    try {
-        await sock.sendMessage(chatId, { text: '✅ Update complete! Restarting…' }, { quoted: message });
-    } catch {}
-    try {
-        // Preferred: PM2
-        await run('pm2 restart all');
-        return;
-    } catch {}
-    // Panels usually auto-restart when the process exits.
-    // Exit after a short delay to allow the above message to flush.
-    setTimeout(() => {
-        process.exit(0);
-    }, 500);
-}
-
-async function updateCommand(sock, chatId, message, zipOverride) {
+async function updateCommand(sock, chatId, message) {
     const senderId = message.key.participant || message.key.remoteJid;
     const isOwner = await isOwnerOrSudo(senderId, sock, chatId);
     
+    // 1. Ulinzi wa Mfumo - Owner au Sudo tu anapiga amri
     if (!message.key.fromMe && !isOwner) {
-        await sock.sendMessage(chatId, { text: 'Only bot owner or sudo can use .update' }, { quoted: message });
+        await sock.sendMessage(chatId, { text: '❌ *𝖬𝖠𝖢𝖧𝖠-...* Amri hii ni maalum kwa mmiliki wa mfumo tu.' }, { quoted: message });
         return;
     }
+
     try {
-        // Minimal UX
-        await sock.sendMessage(chatId, { text: '🔄 Updating the bot, please wait…' }, { quoted: message });
-        if (await hasGitRepo()) {
-            // silent
-            const { oldRev, newRev, alreadyUpToDate, commits, files } = await updateViaGit();
-            // Short message only: version info
-            const summary = alreadyUpToDate ? `✅ Already up to date: ${newRev}` : `✅ Updated to ${newRev}`;
-            console.log('[update] summary generated');
-            // silent
-            await run('npm install --no-audit --no-fund');
-        } else {
-            const { copiedFiles } = await updateViaZip(sock, chatId, message, zipOverride);
-            // silent
+        // 2. Weka Reaction ya mzunguko kuonyesha kazi imeanza
+        try { 
+            await sock.sendMessage(chatId, { react: { text: '🔄', key: message.key } }); 
+        } catch (e) {}
+
+        // 3. Hakikisha kama mfumo una Git Repo uliyounganishwa
+        if (!(await hasGitRepo())) {
+            const noGit = `🎧 *𝖬𝖠𝖢𝖧𝖠-𝖠𝖨 𝖴𝖯𝖣𝖠𝖳𝖤*\n\n❌ *𝖤𝖱𝖱𝖮𝖱:* Mfumo haujapata folda la \`.git\`. Tafadhali hakikisha umeunganisha Panel yako na repo la \`djmacha255/MACHA-BOT\` kwanza.`;
+            await sock.sendMessage(chatId, { text: noGit }, { quoted: message });
+            return;
         }
-        try {
-            const v = require('../settings').version || '';
-            await sock.sendMessage(chatId, { text: `✅ Update done. Restarting…` }, { quoted: message });
-        } catch {
-            await sock.sendMessage(chatId, { text: '✅ Restared Successfully\n Type .ping to check latest version.' }, { quoted: message });
+
+        // Tuma ujumbe wa kuanza upekuzi
+        await sock.sendMessage(chatId, { text: '🎧 *𝖬𝖠𝖢𝖧𝖠-𝖠𝖨 𝖢𝖮𝖱𝖤*\n\n🔄 Mfumo unaanza kuvuta maboresho kutoka kwenye GitHub Repository (`djmacha255/MACHA-BOT`)...' }, { quoted: message });
+
+        // 4. Run Git Pull / Update Logic
+        const { oldRev, newRev, alreadyUpToDate, commits, files } = await updateViaGit();
+
+        // Kama mfumo upo kwenye toleo la mwisho tayari
+        if (alreadyUpToDate) {
+            const upToDate = `🎧 *𝖬𝖠𝖢𝖧𝖠-𝖠𝖨 𝖴𝖯𝖣𝖠𝖳𝖤*\n\n🟢 *𝖲𝖸𝖲𝖳𝖤𝖬 𝖫𝖠𝖳𝖤𝖲𝖳*\nMifumo yako yote ipo kwenye toleo la sasa hivi kulingana na repo la \`djmacha255/MACHA-BOT\`. Hakuna maboresho mapya bado.`;
+            await sock.sendMessage(chatId, { text: upToDate }, { quoted: message });
+            return;
         }
-        await restartProcess(sock, chatId, message);
+
+        // Kusakinisha upya "dependencies" kama kuna package mpya imezidishwa
+        await run('npm install --no-audit --no-fund');
+
+        // Muundo wa Jibu la mafanikio ya sasisho (Cyber Grid Layout)
+        const jibuLaMafanikio = 
+`┌───『 🔄 *𝖲𝖸𝖲𝖳𝖤𝖬 𝖴𝖯𝖣𝖠𝖳𝖤𝖣* 』
+│
+│ ✅ *𝖲𝗍𝖺𝗍𝗎𝖲:* Maboresho yamevutwa kikamilifu!
+│ 📁 *𝖱𝖾𝖯𝗈:* djmacha255/MACHA-BOT
+│ 🆔 *𝖵𝖾𝗋𝗌𝗂𝗈𝖭:* ${oldRev.slice(0, 7)} ➔ ${newRev.slice(0, 7)}
+│
+├─『 📊 *𝖢𝖧𝖠𝖭𝖦𝖤𝖫𝖮𝖦𝖲* 』
+│ \`\`\`${commits ? commits.trim() : 'Maboresho ya ndani ya kodi yamekamilika.'}\`\`\`
+│
+└─────────────────────────┈⊷
+
+💡 _Mfumo unajizima sasa hivi kwa sekunde 2 ili kuwaka upya ukiwa na kodi mpya._
+
+🎧 *𝖯𝖮𝖶𝖤𝖱𝖤𝖣 𝖡𝖸 𝖣𝖱𝖨𝖵𝖤 𝖬𝖠𝖢𝖧𝖠 𝖢𝖮𝖱𝖤*`;
+
+        await sock.sendMessage(chatId, { text: jibuLaMafanikio }, { quoted: message });
+
+        // 5. Zima mfumo ili uwashe upya ukiwa "Fresh"
+        setTimeout(() => {
+            process.exit(0);
+        }, 2000);
+
     } catch (err) {
         console.error('Update failed:', err);
-        await sock.sendMessage(chatId, { text: `❌ Update failed:\n${String(err.message || err)}` }, { quoted: message });
+        const jibuBaya = `🎧 *𝖬𝖠𝖢𝖧𝖠-𝖠𝖨 𝖴𝖯𝖣𝖠𝖳𝖤*\n\n❌ *𝖴𝖯𝖣𝖠𝖳𝖤  𝖥𝖠𝖨𝖫𝖤𝖣*\n\`\`\`${String(err.message || err)}\`\`\``;
+        await sock.sendMessage(chatId, { text: jibuBaya }, { quoted: message });
     }
 }
 
 module.exports = updateCommand;
-
-
