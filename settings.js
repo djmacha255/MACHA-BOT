@@ -11,7 +11,7 @@ const settings = {
   description: "Advanced WhatsApp Multi-Device Bot integrated with AI Core Engines and Cyber Reconnaissance Suites. Engineered by DJ MACHA 255.",
   version: "3.0.7",
   // Inasoma sasa kutoka kwenye Repository yako rasmi kiotomatiki
-  updateZipUrl: "https://github.com/djmacha255/MACHA-BOT/archive/refs/heads/main.zip",
+  updateZipUrl: "https://github.com/djmacha255/MACHA-BOT.git",
 };
 
 module.exports = settings;
